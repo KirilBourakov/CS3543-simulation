@@ -60,7 +60,9 @@ print(f"[2/5] Seeding Target Account {TARGET_ACCOUNT_ID}...", flush=True)
 
 target_tx_batch = []
 target_purchase_batch = []
+risk_assessment_batch = []
 tx_id_seq = 1
+risk_assessment_id_seq = 1
 
 june_start = datetime(2026, 6, 1)
 
@@ -72,6 +74,11 @@ for i in range(1500):
 
     target_tx_batch.append((tx_id_seq, TARGET_ACCOUNT_ID, 'PURCHASE', amt, t_date, p_date, 'Target Account Tx', disputed))
     target_purchase_batch.append((tx_id_seq, 'PURCHASE', TARGET_ACCOUNT_ID, 1, random.randint(1, NUM_MERCHANTS), f"TERM-{random.randint(100, 999)}", "AUTH01", False))
+    # Give query2 qualifying risk rows as well as lower scores for filtering.
+    if i % 10 == 0:
+        risk_score = 30.0 if i % 20 == 0 else 15.0
+        risk_assessment_batch.append((risk_assessment_id_seq, tx_id_seq, p_date, 'seed-v1', risk_score, 'REVIEW' if risk_score >= 25 else 'APPROVE', 25))
+        risk_assessment_id_seq += 1
     tx_id_seq += 1
 
 cursor.executemany("""
@@ -83,6 +90,10 @@ cursor.executemany("""
     INSERT INTO tx_purchase (transaction_id, transaction_type, account_id, card_id, merchant_id, terminal_id, auth_code, is_recurring)
     VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
 """, target_purchase_batch)
+cursor.executemany("""
+    INSERT INTO risk_assessment (risk_assessment_id, transaction_id, assessment_timestamp, model_version, risk_score, decision, processing_time_ms)
+    VALUES (%s, %s, %s, %s, %s, %s, %s);
+""", risk_assessment_batch)
 conn.commit()
 
 print(f"[3/5] Seeding {BACKGROUND_TX_COUNT} background rows in batches of {BATCH_SIZE}...", flush=True)
@@ -93,6 +104,7 @@ total_inserted = 0
 while total_inserted < BACKGROUND_TX_COUNT:
     current_tx = []
     current_tp = []
+    current_risk = []
     
     for _ in range(BATCH_SIZE):
         acc = random.choice(account_ids[1:])
@@ -102,6 +114,12 @@ while total_inserted < BACKGROUND_TX_COUNT:
         
         current_tx.append((tx_id_seq, acc, 'PURCHASE', amt, t_date, p_date, 'Background Purchase', False))
         current_tp.append((tx_id_seq, 'PURCHASE', acc, 2, random.randint(1, NUM_MERCHANTS), 'POS-REG', 'AUTH99', False))
+        # One assessment per 100 background transactions keeps the extra
+        # dataset representative without adding a risk row for every purchase.
+        if tx_id_seq % 100 == 0:
+            risk_score = 35.0 if tx_id_seq % 200 == 0 else 10.0
+            current_risk.append((risk_assessment_id_seq, tx_id_seq, p_date, 'seed-v1', risk_score, 'REVIEW' if risk_score >= 25 else 'APPROVE', 30))
+            risk_assessment_id_seq += 1
         tx_id_seq += 1
 
     cursor.executemany("""
@@ -113,6 +131,11 @@ while total_inserted < BACKGROUND_TX_COUNT:
         INSERT INTO tx_purchase (transaction_id, transaction_type, account_id, card_id, merchant_id, terminal_id, auth_code, is_recurring)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
     """, current_tp)
+    if current_risk:
+        cursor.executemany("""
+            INSERT INTO risk_assessment (risk_assessment_id, transaction_id, assessment_timestamp, model_version, risk_score, decision, processing_time_ms)
+            VALUES (%s, %s, %s, %s, %s, %s, %s);
+        """, current_risk)
 
     conn.commit()
     total_inserted += BATCH_SIZE
